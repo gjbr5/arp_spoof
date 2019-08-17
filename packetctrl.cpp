@@ -1,21 +1,28 @@
 #include "packetctrl.h"
 #include "packetheader.h"
+#include "session.h"
 #include <algorithm>
 #include <cstring>
 #include <pcap.h>
+#include <set>
 
 std::string PacketCtrl::dev = "";
 pcap_t *PacketCtrl::handle = nullptr;
 char PacketCtrl::errbuf[PCAP_ERRBUF_SIZE] = {0};
-std::map<void *, std::function<void(const uint8_t *)>> PacketCtrl::callbacks;
+
 std::thread PacketCtrl::recv_thrd;
-std::mutex PacketCtrl::mutex;
+std::mutex PacketCtrl::periodic_mutex;
+std::list<std::function<bool(time_t)>> PacketCtrl::periodic_callbacks;
+std::mutex PacketCtrl::recv_mutex;
+std::list<std::function<bool(const uint8_t *)>> PacketCtrl::recv_callbacks;
 bool PacketCtrl::loop = true;
 
 void PacketCtrl::init(std::string dev)
 {
     PacketCtrl::dev = dev;
+    handle = pcap_open_live(dev.c_str(), BUFSIZ, 1, 1000, errbuf);
     recv_thrd = std::thread(PacketCtrl::recv_packet);
+    recv_thrd.detach();
 }
 
 std::string PacketCtrl::get_device()
@@ -23,18 +30,18 @@ std::string PacketCtrl::get_device()
     return dev;
 }
 
-void PacketCtrl::insert_callback(void *which, std::function<void(const uint8_t *)> func)
+void PacketCtrl::insert_callback(std::function<bool(time_t)> func)
 {
-    mutex.lock();
-    callbacks.insert(std::pair<void *, std::function<void(const uint8_t *)>>(which, func));
-    mutex.unlock();
+    periodic_mutex.lock();
+    periodic_callbacks.push_back(func);
+    periodic_mutex.unlock();
 }
 
-void PacketCtrl::erase_callback(void *which)
+void PacketCtrl::insert_callback(std::function<bool(const uint8_t *)> func)
 {
-    mutex.lock();
-    callbacks.erase(callbacks.find(which));
-    mutex.unlock();
+    recv_mutex.lock();
+    recv_callbacks.push_back(func);
+    recv_mutex.unlock();
 }
 
 void PacketCtrl::send_arp_request(InetAddress target)
@@ -74,18 +81,24 @@ void PacketCtrl::send_arp_reply(HWAddress sm, InetAddress si, HWAddress tm, Inet
     packet.arp.tm = tm;
     packet.arp.ti = ti;
 
+    std::cout << "Sending ARP Packet: (" << si.to_str() << " = " << sm.to_str() << ") to "
+              << ti.to_str() << "...\n";
+
     pcap_sendpacket(handle, reinterpret_cast<const u_char *>(&packet), sizeof(packet));
 }
 
 void PacketCtrl::relay_ip_packet(const IPPacket *packet, HostInfo target)
 {
-    size_t length = packet->ip.total_length + sizeof(EthernetHeader);
+    size_t length = ntohs(packet->ip.total_length) + sizeof(EthernetHeader);
     uint8_t *relay = new uint8_t[length];
     memcpy(relay, packet, length);
 
     EthernetHeader *eth = reinterpret_cast<EthernetHeader *>(relay);
     eth->smac = HostInfo::my_info().hwaddr;
     eth->dmac = target.hwaddr;
+
+    std::cout << "IP Packet Relayed: " << packet->ip.src_ip.to_str() << " to "
+              << packet->ip.dst_ip.to_str() << "\n";
 
     pcap_sendpacket(handle, relay, int(length));
 
@@ -94,27 +107,41 @@ void PacketCtrl::relay_ip_packet(const IPPacket *packet, HostInfo target)
 
 void PacketCtrl::recv_packet()
 {
-    handle = pcap_open_live(dev.c_str(), BUFSIZ, 1, 1000, errbuf);
     while (loop) {
         struct pcap_pkthdr *header;
         const uint8_t *packet;
+        periodic_mutex.lock();
+        time_t now = time(nullptr);
+        for (auto it = periodic_callbacks.begin(); it != periodic_callbacks.end(); it++) {
+            if ((*it)(now)) {
+                periodic_callbacks.erase(it);
+                it = periodic_callbacks.begin();
+            }
+        }
+        periodic_mutex.unlock();
         int res = pcap_next_ex(handle, &header, &packet);
         if (res == 0)
             continue;
         if (res < 0)
             return;
-        mutex.lock();
-        for (std::pair<void *, std::function<void(const uint8_t *)>> pair : callbacks) {
-            pair.second(packet);
+        recv_mutex.lock();
+        for (auto it = recv_callbacks.begin(); it != recv_callbacks.end(); it++) {
+            if ((*it)(packet)) {
+                recv_callbacks.erase(it);
+                it = recv_callbacks.begin();
+            }
         }
-        mutex.unlock();
+        recv_mutex.unlock();
     }
 
     pcap_close(handle);
     exit(0);
 }
 
-void PacketCtrl::terminate(int)
+void PacketCtrl::terminate()
 {
     loop = false;
+    recv_mutex.lock();
+    recv_callbacks.clear();
+    recv_mutex.unlock();
 }

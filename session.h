@@ -5,23 +5,20 @@
 #include "packetctrl.h"
 #include "packetheader.h"
 #include <iostream>
+#include <set>
 #include <string>
-
-#include <mutex>
-#include <thread>
 #include <queue>
 
 class Session
 {
 private:
     HostInfo sender, target;
-
     bool isOpened = false;
 
 public:
     Session(HostInfo sender, HostInfo target);
     ~Session();
-
+    static std::set<Session *> get_opened();
     void open();
     void close();
 

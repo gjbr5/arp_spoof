@@ -14,14 +14,14 @@ HostInfo::HostInfo(InetAddress inaddr)
     : inaddr(inaddr)
 {
     hwaddr = HWAddress::UNKNOWN;
-    PacketCtrl::insert_callback(this, [&](const uint8_t *packet) -> void {
+    PacketCtrl::insert_callback([&](const uint8_t *packet) -> bool {
         const ARPPacket *arp_pkt = reinterpret_cast<const ARPPacket *>(packet);
         if (arp_pkt->eth.type != EthernetHeader::ARP_TYPE)
-            return;
+            return false;
         if (arp_pkt->arp.si != inaddr)
-            return;
+            return false;
         hwaddr = arp_pkt->arp.sm;
-        PacketCtrl::erase_callback(this);
+        return true;
     });
 
     for (unsigned int i = 1; hwaddr == HWAddress::UNKNOWN; i++) {
@@ -41,7 +41,8 @@ HostInfo::HostInfo(HWAddress hwaddr, InetAddress inaddr)
     : hwaddr(hwaddr)
     , inaddr(inaddr)
 {
-    std::cout << to_str() << std::endl;
+    if (hwaddr != HWAddress::UNKNOWN)
+        std::cout << to_str() << std::endl;
 }
 
 std::string HostInfo::to_str()
@@ -60,20 +61,28 @@ HostInfo HostInfo::my_info()
         exit(1);
     }
 
-    struct ifreq ifr;
-    strncpy(ifr.ifr_name, dev.c_str(), sizeof(dev) - 1);
+    HWAddress hw;
+    {
+        struct ifreq ifr;
+        strncpy(ifr.ifr_name, dev.c_str(), sizeof(dev) - 1);
 
-    int sock = socket(AF_UNIX, SOCK_DGRAM, 0);
-    if (sock < 0 || ioctl(sock, SIOCGIFHWADDR, &ifr) < 0)
-        exit(1);
-    close(sock);
-    HWAddress hw = HWAddress(ifr.ifr_hwaddr.sa_data);
+        int sock = socket(AF_UNIX, SOCK_DGRAM, 0);
+        if (sock < 0 || ioctl(sock, SIOCGIFHWADDR, &ifr) < 0)
+            exit(1);
+        close(sock);
+        hw = HWAddress(ifr.ifr_hwaddr.sa_data);
+    }
 
-    sock = socket(AF_INET, SOCK_DGRAM, 0);
-    if (sock < 0 || ioctl(sock, SIOCGIFADDR, &ifr) < 0)
-        exit(1);
-    close(sock);
-    InetAddress in = InetAddress(reinterpret_cast<const uint8_t *>(ifr.ifr_addr.sa_data + 2));
+    InetAddress in;
+    {
+        struct ifreq ifr;
+        strncpy(ifr.ifr_name, dev.c_str(), sizeof(dev) - 1);
+        int sock = socket(AF_INET, SOCK_DGRAM, 0);
+        if (sock < 0 || ioctl(sock, SIOCGIFADDR, &ifr) < 0)
+            exit(1);
+        close(sock);
+        in = InetAddress(reinterpret_cast<const uint8_t *>(ifr.ifr_addr.sa_data + 2));
+    }
 
     HostInfo::MY_INFO = HostInfo(hw, in);
 

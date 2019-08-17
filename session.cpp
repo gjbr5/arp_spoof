@@ -23,32 +23,54 @@ void Session::open()
     isOpened = true;
     std::cout << "Session Opened: " << to_str() << std::endl;
 
-    PacketCtrl::insert_callback(this, [&](const uint8_t *packet) -> void {
+    PacketCtrl::insert_callback([&](const uint8_t *packet) -> bool {
+        if (!isOpened) {
+            return true;
+        }
+
         if (packet == nullptr)
-            return;
+            return false;
 
         const EthernetHeader *eth_hdr = reinterpret_cast<const EthernetHeader *>(packet);
         if (eth_hdr->smac != sender.hwaddr)
-            return;
+            return false;
 
         if (eth_hdr->type == EthernetHeader::ARP_TYPE) {
             const ARPPacket *arp_pkt = reinterpret_cast<const ARPPacket *>(packet);
-            if (arp_pkt->arp.ti == target.inaddr)
+            if (arp_pkt->arp.ti == target.inaddr) {
                 PacketCtrl::send_arp_reply(HostInfo::my_info().hwaddr,
                                            target.inaddr,
                                            sender.hwaddr,
                                            sender.inaddr);
+            }
 
         } else if (eth_hdr->type == EthernetHeader::IP_TYPE) {
             const IPPacket *ip_pkt = reinterpret_cast<const IPPacket *>(packet);
             if (ip_pkt->ip.dst_ip != HostInfo::my_info().inaddr)
                 PacketCtrl::relay_ip_packet(ip_pkt, target);
         }
+        return false;
     });
-    PacketCtrl::send_arp_reply(HostInfo::my_info().hwaddr,
-                               target.inaddr,
-                               sender.hwaddr,
-                               sender.inaddr);
+
+    PacketCtrl::insert_callback([&](time_t now) -> bool {
+        if (!isOpened)
+            return true;
+        static time_t last = 0;
+        if (now - last > 5) {
+            for (int i = 0; i < 3; i++)
+                PacketCtrl::send_arp_reply(HostInfo::my_info().hwaddr,
+                                           target.inaddr,
+                                           sender.hwaddr,
+                                           sender.inaddr);
+            last = now;
+        }
+        return false;
+    });
+    for (int i = 0; i < 3; i++)
+        PacketCtrl::send_arp_reply(HostInfo::my_info().hwaddr,
+                                   target.inaddr,
+                                   sender.hwaddr,
+                                   sender.inaddr);
 }
 
 void Session::close()
@@ -57,9 +79,8 @@ void Session::close()
         return;
     isOpened = false;
     std::cout << "Session closed: " << to_str() << std::endl;
-
-    PacketCtrl::erase_callback(this);
-    PacketCtrl::send_arp_reply(target.hwaddr, target.inaddr, sender.hwaddr, sender.inaddr);
+    for (int i = 0; i < 3; i++)
+        PacketCtrl::send_arp_reply(target.hwaddr, target.inaddr, sender.hwaddr, sender.inaddr);
 }
 
 std::string Session::to_str()
