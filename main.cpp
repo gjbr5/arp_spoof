@@ -9,12 +9,14 @@
 
 static std::list<Session> sessions;
 
-void terminate(int)
+[[noreturn]] void terminate(int)
 {
     for (Session session : sessions) {
         session.close();
     }
     PacketCtrl::terminate();
+
+    exit(0);
 }
 
 int main(int argc, char *argv[])

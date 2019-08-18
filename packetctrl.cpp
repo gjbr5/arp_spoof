@@ -5,24 +5,36 @@
 #include <cstring>
 #include <pcap.h>
 #include <set>
+#include <unistd.h>
 
 std::string PacketCtrl::dev = "";
 pcap_t *PacketCtrl::handle = nullptr;
 char PacketCtrl::errbuf[PCAP_ERRBUF_SIZE] = {0};
 
-std::thread PacketCtrl::recv_thrd;
-std::mutex PacketCtrl::periodic_mutex;
+std::mutex PacketCtrl::period_mutex;
 std::list<std::function<bool(time_t)>> PacketCtrl::periodic_callbacks;
 std::mutex PacketCtrl::recv_mutex;
 std::list<std::function<bool(const uint8_t *)>> PacketCtrl::recv_callbacks;
 bool PacketCtrl::loop = true;
+PacketCtrl *PacketCtrl::instance = nullptr;
+
+PacketCtrl::PacketCtrl()
+    : period_thrd(PacketCtrl::period_send)
+    , recv_thrd(PacketCtrl::recv_packet)
+{}
+
+PacketCtrl::~PacketCtrl()
+{
+    period_thrd.detach();
+    recv_thrd.detach();
+}
 
 void PacketCtrl::init(std::string dev)
 {
     PacketCtrl::dev = dev;
     handle = pcap_open_live(dev.c_str(), BUFSIZ, 1, 1000, errbuf);
-    recv_thrd = std::thread(PacketCtrl::recv_packet);
-    recv_thrd.detach();
+    if (instance == nullptr)
+        instance = new PacketCtrl();
 }
 
 std::string PacketCtrl::get_device()
@@ -32,9 +44,9 @@ std::string PacketCtrl::get_device()
 
 void PacketCtrl::insert_callback(std::function<bool(time_t)> func)
 {
-    periodic_mutex.lock();
+    period_mutex.lock();
     periodic_callbacks.push_back(func);
-    periodic_mutex.unlock();
+    period_mutex.unlock();
 }
 
 void PacketCtrl::insert_callback(std::function<bool(const uint8_t *)> func)
@@ -105,12 +117,10 @@ void PacketCtrl::relay_ip_packet(const IPPacket *packet, HostInfo target)
     delete[] relay;
 }
 
-void PacketCtrl::recv_packet()
+void PacketCtrl::period_send()
 {
     while (loop) {
-        struct pcap_pkthdr *header;
-        const uint8_t *packet;
-        periodic_mutex.lock();
+        period_mutex.lock();
         time_t now = time(nullptr);
         for (auto it = periodic_callbacks.begin(); it != periodic_callbacks.end(); it++) {
             if ((*it)(now)) {
@@ -118,7 +128,19 @@ void PacketCtrl::recv_packet()
                 it = periodic_callbacks.begin();
             }
         }
-        periodic_mutex.unlock();
+        period_mutex.unlock();
+    }
+    period_mutex.lock();
+    periodic_callbacks.clear();
+    period_mutex.unlock();
+}
+
+void PacketCtrl::recv_packet()
+{
+    while (loop) {
+        struct pcap_pkthdr *header;
+        const uint8_t *packet;
+
         int res = pcap_next_ex(handle, &header, &packet);
         if (res == 0)
             continue;
@@ -133,15 +155,16 @@ void PacketCtrl::recv_packet()
         }
         recv_mutex.unlock();
     }
-
+    recv_mutex.lock();
+    recv_callbacks.clear();
+    recv_mutex.unlock();
     pcap_close(handle);
-    exit(0);
 }
 
 void PacketCtrl::terminate()
 {
     loop = false;
-    recv_mutex.lock();
-    recv_callbacks.clear();
-    recv_mutex.unlock();
+
+    delete instance;
+    instance = nullptr;
 }

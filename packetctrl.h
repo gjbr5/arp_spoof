@@ -21,15 +21,21 @@ private:
     static pcap_t *handle;
     static char errbuf[PCAP_ERRBUF_SIZE];
 
-    static std::list<std::function<bool(time_t)>> periodic_callbacks;
-    static std::list<std::function<bool(const uint8_t *)>> recv_callbacks;
-    static std::mutex periodic_mutex;
-    static std::thread recv_thrd;
-    static std::mutex recv_mutex;
-
     static bool loop;
 
+    static std::list<std::function<bool(time_t)>> periodic_callbacks;
+    static std::mutex period_mutex;
+    std::thread period_thrd;
+
+    static std::list<std::function<bool(const uint8_t *)>> recv_callbacks;
+    static std::mutex recv_mutex;
+    std::thread recv_thrd;
+
     static void recv_packet();
+    static void period_send();
+    static PacketCtrl *instance;
+    PacketCtrl();
+    ~PacketCtrl();
 
 public:
     static void init(std::string dev);
